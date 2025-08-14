@@ -488,6 +488,7 @@ const handleCarManagement = async (chatId) => {
     ]
   };
   
+  delete adminState[chatId];
   await bot.sendMessage(chatId, 'Выберите действие:', { reply_markup: keyboard });
 };
 
@@ -500,6 +501,7 @@ const handleOrderManagement = async (chatId) => {
     ]
   };
   
+  delete adminState[chatId];
   await bot.sendMessage(chatId, 'Выберите тип заказов:', { reply_markup: keyboard });
 };
 
@@ -511,7 +513,379 @@ const handleUserManagement = async (chatId) => {
     ]
   };
   
+  delete adminState[chatId];
   await bot.sendMessage(chatId, 'Выберите действие:', { reply_markup: keyboard });
+};
+
+// Admin helpers and flows
+const clearAdminState = (chatId) => { delete adminState[chatId]; };
+
+const formatCarLabel = (car) => `${car.brand} (${car.licensePlate})`;
+
+const adminAddCarFlow = async (chatId) => {
+  try {
+    clearAdminState(chatId);
+
+    await bot.sendMessage(chatId, 'Введите марку:');
+    const brandMsg = await waitForNextMessageFrom(chatId);
+    const brand = brandMsg.text.trim();
+    if (!brand) {
+      await bot.sendMessage(chatId, 'Марка не может быть пустой. Отменено.');
+      return;
+    }
+
+    await bot.sendMessage(chatId, 'Введите гос.номер (например, А123ВС77):');
+    const plateMsg = await waitForNextMessageFrom(chatId);
+    const licensePlate = plateMsg.text.trim().toUpperCase();
+    if (!licensePlate) {
+      await bot.sendMessage(chatId, 'Гос.номер не может быть пустым. Отменено.');
+      return;
+    }
+
+    await bot.sendMessage(chatId, 'Введите объем в м³ (например, 10):');
+    const capacityMsg = await waitForNextMessageFrom(chatId);
+    const capacity = capacityMsg.text.trim();
+    if (!capacity) {
+      await bot.sendMessage(chatId, 'Объем не может быть пустым. Отменено.');
+      return;
+    }
+
+    await bot.sendMessage(chatId, 'Введите максимальную длину шланга в метрах (например, 20):');
+    const hoseMsg = await waitForNextMessageFrom(chatId);
+    const hoseLength = hoseMsg.text.trim();
+    if (!hoseLength) {
+      await bot.sendMessage(chatId, 'Длина шланга не может быть пустой. Отменено.');
+      return;
+    }
+
+    const defaultSchedule = {
+      days: [0,1,2,3,4,5,6],
+      hours: { start: 8, end: 20 }
+    };
+
+    const car = new Car({
+      brand,
+      licensePlate,
+      capacity,
+      hoseLength,
+      schedule: defaultSchedule,
+      isActive: true
+    });
+
+    try {
+      await car.save();
+    } catch (e) {
+      if (e && e.code === 11000) {
+        await bot.sendMessage(chatId, 'Автомобиль с таким гос.номером уже существует.');
+        return;
+      }
+      throw e;
+    }
+
+    await bot.sendMessage(chatId, `✅ Автомобиль добавлен: ${formatCarLabel(car)}\nОбъем: ${capacity} м³\nШланг: ${hoseLength} м`);
+  } catch (error) {
+    console.error('adminAddCarFlow error:', error);
+    await bot.sendMessage(chatId, '⚠️ Ошибка при добавлении автомобиля');
+  }
+};
+
+const adminListCars = async (chatId) => {
+  try {
+    clearAdminState(chatId);
+    const cars = await Car.find().sort({ isActive: -1, brand: 1, licensePlate: 1 }).exec();
+    if (!cars.length) {
+      await bot.sendMessage(chatId, 'Список пуст. Добавьте автомобиль.');
+      return;
+    }
+    const lines = cars.map(c => {
+      const status = c.isActive ? '✅ Активен' : '⛔ Неактивен';
+      return `${formatCarLabel(c)}\n${status}\nОбъем: ${c.capacity} м³, Шланг: ${c.hoseLength} м\n`;
+    });
+    const message = lines.join('\n');
+    const chunks = [];
+    let buffer = '';
+    for (const line of lines) {
+      if ((buffer + line + '\n').length > 3500) {
+        chunks.push(buffer);
+        buffer = '';
+      }
+      buffer += line + '\n';
+    }
+    if (buffer) chunks.push(buffer);
+    for (const chunk of chunks) {
+      await bot.sendMessage(chatId, chunk.trim());
+    }
+  } catch (error) {
+    console.error('adminListCars error:', error);
+    await bot.sendMessage(chatId, '⚠️ Ошибка при получении списка автомобилей');
+  }
+};
+
+const adminToggleCarList = async (chatId) => {
+  try {
+    clearAdminState(chatId);
+    const cars = await Car.find().sort({ brand: 1, licensePlate: 1 }).exec();
+    if (!cars.length) {
+      await bot.sendMessage(chatId, 'Список пуст.');
+      return;
+    }
+    const rows = cars.map(c => ([{ text: `${c.isActive ? '✅' : '⛔'} ${formatCarLabel(c)}`, callback_data: `admin_car_select:${c._id}` }]));
+    await bot.sendMessage(chatId, 'Выберите автомобиль:', { reply_markup: { inline_keyboard: rows } });
+  } catch (error) {
+    console.error('adminToggleCarList error:', error);
+    await bot.sendMessage(chatId, '⚠️ Ошибка при загрузке списка автомобилей');
+  }
+};
+
+const adminShowCarActions = async (chatId, carId) => {
+  try {
+    const car = await Car.findById(carId).exec();
+    if (!car) {
+      await bot.sendMessage(chatId, 'Автомобиль не найден');
+      return;
+    }
+    const actionsRow = [];
+    if (car.isActive) {
+      actionsRow.push({ text: 'Сделать неактивным', callback_data: `admin_car_set_active:${car._id}:0` });
+    } else {
+      actionsRow.push({ text: 'Сделать активным', callback_data: `admin_car_set_active:${car._id}:1` });
+    }
+    const keyboard = {
+      inline_keyboard: [
+        actionsRow,
+        [{ text: 'Удалить', callback_data: `admin_car_delete:${car._id}` }]
+      ]
+    };
+    await bot.sendMessage(chatId, `${formatCarLabel(car)}\nСтатус: ${car.isActive ? 'Активен' : 'Неактивен'}`, { reply_markup: keyboard });
+  } catch (error) {
+    console.error('adminShowCarActions error:', error);
+    await bot.sendMessage(chatId, '⚠️ Ошибка при загрузке данных автомобиля');
+  }
+};
+
+const adminSetCarActive = async (chatId, carId, isActive) => {
+  try {
+    const car = await Car.findByIdAndUpdate(carId, { $set: { isActive: !!isActive } }, { new: true }).exec();
+    if (!car) {
+      await bot.sendMessage(chatId, 'Автомобиль не найден');
+      return;
+    }
+    await bot.sendMessage(chatId, `Статус обновлен: ${formatCarLabel(car)} → ${car.isActive ? 'Активен' : 'Неактивен'}`);
+  } catch (error) {
+    console.error('adminSetCarActive error:', error);
+    await bot.sendMessage(chatId, '⚠️ Ошибка при изменении статуса');
+  }
+};
+
+const adminDeleteCar = async (chatId, carId) => {
+  try {
+    const ordersDeleted = await Order.deleteMany({ car: carId }).exec();
+    const car = await Car.findByIdAndDelete(carId).exec();
+    if (!car) {
+      await bot.sendMessage(chatId, 'Автомобиль не найден или уже удален');
+      return;
+    }
+    await bot.sendMessage(chatId, `🗑️ Удален автомобиль ${formatCarLabel(car)}. Удалено связанных заказов: ${ordersDeleted.deletedCount}`);
+  } catch (error) {
+    console.error('adminDeleteCar error:', error);
+    await bot.sendMessage(chatId, '⚠️ Ошибка при удалении автомобиля');
+  }
+};
+
+const orderStatusLabel = (status) => {
+  if (status === 'new') return 'Новый';
+  if (status === 'confirmed') return 'Подтвержден';
+  if (status === 'completed') return 'Завершен';
+  if (status === 'canceled') return 'Отменен';
+  return status;
+};
+
+const sendOrderWithActions = async (chatId, order) => {
+  const lines = [
+    `🆔 ${order._id}`,
+    `Статус: ${orderStatusLabel(order.status)}`,
+    `Дата: ${formatDate(order.datetime)}`,
+    `Авто: ${order.car ? formatCarLabel(order.car) : '—'}`,
+    `Клиент: ${order.user ? (order.user.name || order.user.telegramId) : '—'} (${order.user && order.user.phone ? order.user.phone : '—'})`
+  ];
+  if (order.status === 'canceled' && order.cancelReason) {
+    lines.push(`Причина отмены: ${order.cancelReason}`);
+  }
+  const text = lines.join('\n');
+  const buttons = [];
+  if (order.status === 'new') {
+    buttons.push([{ text: '✅ Подтвердить', callback_data: `admin_order_confirm:${order._id}` }]);
+    buttons.push([{ text: '❌ Отменить', callback_data: `admin_order_cancel:${order._id}` }]);
+  } else if (order.status === 'confirmed') {
+    buttons.push([{ text: '✅ Завершить', callback_data: `admin_order_complete:${order._id}` }]);
+    buttons.push([{ text: '❌ Отменить', callback_data: `admin_order_cancel:${order._id}` }]);
+  }
+  buttons.push([{ text: '🗑️ Удалить', callback_data: `admin_order_delete:${order._id}` }]);
+  await bot.sendMessage(chatId, text, { reply_markup: { inline_keyboard: buttons } });
+};
+
+const adminListOrders = async (chatId, type) => {
+  try {
+    clearAdminState(chatId);
+    const filter = {};
+    if (type === 'new') filter.status = 'new';
+    if (type === 'confirmed') filter.status = 'confirmed';
+    const orders = await Order.find(filter).populate('user').populate('car').sort({ datetime: 1 }).exec();
+    if (!orders.length) {
+      await bot.sendMessage(chatId, 'Список заказов пуст.');
+      return;
+    }
+    for (const order of orders) {
+      await sendOrderWithActions(chatId, order);
+    }
+  } catch (error) {
+    console.error('adminListOrders error:', error);
+    await bot.sendMessage(chatId, '⚠️ Ошибка при получении заказов');
+  }
+};
+
+const adminOrderConfirm = async (chatId, orderId) => {
+  try {
+    const order = await Order.findById(orderId).populate('user').populate('car').exec();
+    if (!order) {
+      await bot.sendMessage(chatId, 'Заказ не найден');
+      return;
+    }
+    if (order.status !== 'new') {
+      await bot.sendMessage(chatId, 'Можно подтвердить только новый заказ');
+      return;
+    }
+    order.status = 'confirmed';
+    await order.save();
+    await bot.sendMessage(chatId, `Заказ ${order._id} подтвержден.`);
+    if (order.user && order.user.telegramId) {
+      await bot.sendMessage(order.user.telegramId, `Ваш заказ подтвержден. Дата: ${formatDate(order.datetime)}. Авто: ${order.car ? formatCarLabel(order.car) : ''}`);
+    }
+  } catch (error) {
+    console.error('adminOrderConfirm error:', error);
+    await bot.sendMessage(chatId, '⚠️ Ошибка при подтверждении заказа');
+  }
+};
+
+const adminOrderCancelFlow = async (chatId, orderId) => {
+  try {
+    const order = await Order.findById(orderId).populate('user').populate('car').exec();
+    if (!order) {
+      await bot.sendMessage(chatId, 'Заказ не найден');
+      return;
+    }
+    await bot.sendMessage(chatId, 'Введите причину отмены:');
+    const reasonMsg = await waitForNextMessageFrom(chatId);
+    const reason = reasonMsg.text.trim();
+    order.status = 'canceled';
+    order.cancelReason = reason || 'Не указана';
+    await order.save();
+    await bot.sendMessage(chatId, `Заказ ${order._id} отменен.`);
+    if (order.user && order.user.telegramId) {
+      await bot.sendMessage(order.user.telegramId, `Ваш заказ отменен. Причина: ${order.cancelReason}`);
+    }
+  } catch (error) {
+    console.error('adminOrderCancelFlow error:', error);
+    await bot.sendMessage(chatId, '⚠️ Ошибка при отмене заказа');
+  }
+};
+
+const adminOrderComplete = async (chatId, orderId) => {
+  try {
+    const order = await Order.findById(orderId).populate('user').populate('car').exec();
+    if (!order) {
+      await bot.sendMessage(chatId, 'Заказ не найден');
+      return;
+    }
+    if (order.status !== 'confirmed') {
+      await bot.sendMessage(chatId, 'Завершить можно только подтвержденный заказ');
+      return;
+    }
+    order.status = 'completed';
+    await order.save();
+    await bot.sendMessage(chatId, `Заказ ${order._id} завершен.`);
+    if (order.user && order.user.telegramId) {
+      await bot.sendMessage(order.user.telegramId, `Ваш заказ выполнен. Спасибо!`);
+    }
+  } catch (error) {
+    console.error('adminOrderComplete error:', error);
+    await bot.sendMessage(chatId, '⚠️ Ошибка при завершении заказа');
+  }
+};
+
+const adminOrderDelete = async (chatId, orderId) => {
+  try {
+    const order = await Order.findByIdAndDelete(orderId).exec();
+    if (!order) {
+      await bot.sendMessage(chatId, 'Заказ не найден или уже удален');
+      return;
+    }
+    await bot.sendMessage(chatId, `Заказ ${orderId} удален.`);
+  } catch (error) {
+    console.error('adminOrderDelete error:', error);
+    await bot.sendMessage(chatId, '⚠️ Ошибка при удалении заказа');
+  }
+};
+
+const adminListUsers = async (chatId) => {
+  try {
+    clearAdminState(chatId);
+    const users = await User.find().sort({ createdAt: -1 }).exec();
+    if (!users.length) {
+      await bot.sendMessage(chatId, 'Пользователей нет.');
+      return;
+    }
+    for (const u of users) {
+      const ordersCount = await Order.countDocuments({ user: u._id }).exec();
+      const lines = [
+        `🆔 ${u.telegramId}`,
+        `Имя: ${u.name || '—'}`,
+        `Телефон: ${u.phone || '—'}`,
+        `Адрес: ${u.address || '—'}`,
+        `Заказов: ${ordersCount}`
+      ];
+      await bot.sendMessage(chatId, lines.join('\n'));
+    }
+  } catch (error) {
+    console.error('adminListUsers error:', error);
+    await bot.sendMessage(chatId, '⚠️ Ошибка при получении списка пользователей');
+  }
+};
+
+const adminFindUserFlow = async (chatId) => {
+  try {
+    clearAdminState(chatId);
+    await bot.sendMessage(chatId, 'Введите имя или телефон для поиска:');
+    const qMsg = await waitForNextMessageFrom(chatId);
+    const q = qMsg.text.trim();
+    if (!q) {
+      await bot.sendMessage(chatId, 'Пустой запрос.');
+      return;
+    }
+    const byPhone = await User.find({ phone: q }).exec();
+    const byName = await User.find({ name: { $regex: q, $options: 'i' } }).exec();
+    const merged = new Map();
+    for (const u of [...byPhone, ...byName]) merged.set(String(u._id), u);
+    const users = Array.from(merged.values());
+    if (!users.length) {
+      await bot.sendMessage(chatId, 'Ничего не найдено.');
+      return;
+    }
+    for (const u of users) {
+      const ordersCount = await Order.countDocuments({ user: u._id }).exec();
+      const lines = [
+        `🆔 ${u.telegramId}`,
+        `Имя: ${u.name || '—'}`,
+        `Телефон: ${u.phone || '—'}`,
+        `Адрес: ${u.address || '—'}`,
+        `Заказов: ${ordersCount}`
+      ];
+      await bot.sendMessage(chatId, lines.join('\n'));
+    }
+  } catch (error) {
+    console.error('adminFindUserFlow error:', error);
+    await bot.sendMessage(chatId, '⚠️ Ошибка при поиске клиента');
+  }
 };
 
 // ========================
@@ -522,6 +896,35 @@ bot.on('message', async (msg) => {
   const text = msg.text;
 
   if (!isAdmin(chatId)) return;
+
+  // Если админ в режиме рассылки, отправляем введенный текст всем пользователям
+  if (adminState[chatId] && adminState[chatId].action === 'broadcast') {
+    delete adminState[chatId];
+    if (!text || !text.trim()) {
+      return bot.sendMessage(chatId, 'Пустое сообщение. Рассылка отменена.');
+    }
+    try {
+      const users = await User.find({}, 'telegramId').exec();
+      let ok = 0; let fail = 0;
+      const chunkSize = 20;
+      for (let i = 0; i < users.length; i += chunkSize) {
+        const chunk = users.slice(i, i + chunkSize);
+        await Promise.all(chunk.map(async (u) => {
+          try {
+            await bot.sendMessage(u.telegramId, text);
+            ok += 1;
+          } catch (e) {
+            fail += 1;
+          }
+        }));
+      }
+      await bot.sendMessage(chatId, `Рассылка завершена. Успешно: ${ok}, Ошибок: ${fail}.`);
+    } catch (error) {
+      console.error('broadcast error:', error);
+      await bot.sendMessage(chatId, '⚠️ Ошибка при выполнении рассылки');
+    }
+    return;
+  }
 
   if (text === '🚗 Управление автомобилями') {
     return handleCarManagement(chatId);
@@ -592,6 +995,48 @@ bot.on('callback_query', async (query) => {
       }
       await bot.answerCallbackQuery(query.id);
       return;
+    }
+
+    // Обработка callback-запросов для админа
+    if (isAdmin(chatId)) {
+      if (data.startsWith('admin_add_car')) {
+        await adminAddCarFlow(chatId);
+      } else if (data.startsWith('admin_list_cars')) {
+        await adminListCars(chatId);
+      } else if (data.startsWith('admin_toggle_car')) {
+        await adminToggleCarList(chatId);
+      } else if (data.startsWith('admin_car_select:')) {
+        const carId = data.split(':')[2];
+        await adminShowCarActions(chatId, carId);
+      } else if (data.startsWith('admin_car_set_active:')) {
+        const [carId, isActive] = data.split(':').slice(2);
+        await adminSetCarActive(chatId, carId, parseInt(isActive, 10));
+      } else if (data.startsWith('admin_car_delete:')) {
+        const carId = data.split(':')[2];
+        await adminDeleteCar(chatId, carId);
+      } else if (data.startsWith('admin_new_orders')) {
+        await adminListOrders(chatId, 'new');
+      } else if (data.startsWith('admin_confirmed_orders')) {
+        await adminListOrders(chatId, 'confirmed');
+      } else if (data.startsWith('admin_all_orders')) {
+        await adminListOrders(chatId, 'all');
+      } else if (data.startsWith('admin_order_confirm:')) {
+        const orderId = data.split(':')[2];
+        await adminOrderConfirm(chatId, orderId);
+      } else if (data.startsWith('admin_order_cancel:')) {
+        const orderId = data.split(':')[2];
+        await adminOrderCancelFlow(chatId, orderId);
+      } else if (data.startsWith('admin_order_complete:')) {
+        const orderId = data.split(':')[2];
+        await adminOrderComplete(chatId, orderId);
+      } else if (data.startsWith('admin_order_delete:')) {
+        const orderId = data.split(':')[2];
+        await adminOrderDelete(chatId, orderId);
+      } else if (data.startsWith('admin_list_users')) {
+        await adminListUsers(chatId);
+      } else if (data.startsWith('admin_find_user')) {
+        await adminFindUserFlow(chatId);
+      }
     }
 
     await bot.answerCallbackQuery(query.id);
